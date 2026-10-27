@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: "Log level"
+        required: true
+        default: "warning"
+        type: choice
+        options:
+          - info
+          - warning
+          - debug
+      release_tag:
+        description: "Release tag to publish to (required for manual run, e.g. 0.1.0 or v0.1.0)"
+        required: false
+        default: ""
+        type: string
+
+  push:
+    branches:
+      - "main"
+      - "feature/**"
+      - "!doc/**"
+    tags:
+      - "*.*.*"
+    paths-ignore:
+      - "Makefile"
+      - "README.md"
+
+  pull_request:
+    branches:
+      - "main"
+      - "feature/**"
+      - "!doc/**"
+    paths-ignore:
+      - "Makefile"
+      - "README.md"
+
+jobs:
+  verify:
+    name: "verify (go ${{ matrix.go }})"
+    runs-on: ubuntu-22.04
+    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - "1.27"
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Go version
+        run: go version
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vulnerability scan (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  release:
+    name: "release ${{ matrix.goos }}/${{ matrix.goarch }}"
+    runs-on: ubuntu-22.04
+    if: >
+      startsWith(github.ref, 'refs/tags/')
+      || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    strategy:
+      fail-fast: false
+      matrix:
+        # Target systems: Linux x86_64, Linux ARM64 and macOS ARM64.
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve build metadata
+        id: meta
+        run: |
+          echo "version=${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Release binary
+        uses: wangyoucao577/go-release-action@v1.55
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          release_tag: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          goversion: "1.27"
+          binary_name: openvpn_exporter
+          ldflags: >-
+            -X 'bodsch.me/openvpn_exporter/pkg/version.Version=${{ steps.meta.outputs.version }}'
+            -X 'bodsch.me/openvpn_exporter/pkg/version.BuildDate=${{ steps.meta.outputs.date }}'
+          sha256sum: true
+          overwrite: true
+          extra_files: LICENSE README.md config.example.yml
