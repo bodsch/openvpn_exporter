@@ -1,0 +1,33 @@
+[Unit]
+Description=Prometheus exporter for OpenVPN
+Documentation=https://github.com/bodsch/openvpn_exporter
+After=network-online.target openvpn-server@server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openvpn_exporter
+Group=openvpn_exporter
+# Read access to certificates, CRL, status file and password file.
+SupplementaryGroups=openvpn
+ExecStart=/usr/local/bin/openvpn_exporter --config.file=/etc/openvpn_exporter/config.yml
+Restart=on-failure
+
+# Only needed with "ping.privileged: true", i.e. when
+# net.ipv4.ping_group_range does not allow unprivileged ICMP sockets.
+#AmbientCapabilities=CAP_NET_RAW
+#CapabilityBoundingSet=CAP_NET_RAW
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (*os.File).Close
+        - fmt.Fprintf

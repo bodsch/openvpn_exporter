@@ -1,0 +1,76 @@
+groups:
+  - name: openvpn
+    rules:
+      - alert: OpenVPNDown
+        expr: openvpn_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: status not readable"
+          description: "The exporter cannot read the status of {{ $labels.server }} on {{ $labels.instance }}."
+
+      - alert: OpenVPNStatusFileStale
+        expr: time() - openvpn_status_updated_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: status not updated for {{ $value | humanizeDuration }}"
+
+      - alert: OpenVPNCertificateExpiresSoon
+        expr: (openvpn_certificate_not_after_timestamp_seconds - time()) / 86400 < 30
+        labels:
+          severity: warning
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: certificate {{ $labels.subject }} expires in {{ $value | printf \"%.0f\" }} days"
+          description: "File: {{ $labels.file }}"
+
+      - alert: OpenVPNCertificateExpiresSoon
+        expr: (openvpn_certificate_not_after_timestamp_seconds - time()) / 86400 < 7
+        labels:
+          severity: critical
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: certificate {{ $labels.subject }} expires in {{ $value | printf \"%.0f\" }} days"
+          description: "File: {{ $labels.file }}"
+
+      - alert: OpenVPNCRLExpiresSoon
+        expr: (openvpn_crl_next_update_timestamp_seconds - time()) / 86400 < 7
+        labels:
+          severity: critical
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: CRL expires in {{ $value | printf \"%.1f\" }} days"
+          description: "An expired CRL rejects all clients. Regenerate {{ $labels.file }} (easyrsa gen-crl)."
+
+      - alert: OpenVPNTLSFileUnreadable
+        expr: openvpn_tls_file_error == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: {{ $labels.kind }} {{ $labels.file }} not readable"
+
+      # replaces check_openvpn.pl -C <common_name> -c
+      - alert: OpenVPNClientNotConnected
+        expr: openvpn_client_connections == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: client {{ $labels.common_name }} is not connected"
+
+      - alert: OpenVPNClientUnreachable
+        expr: openvpn_client_ping_success == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: {{ $labels.common_name }} ({{ $labels.address }}) does not answer pings"
+
+      - alert: OpenVPNClientPacketLoss
+        expr: avg_over_time(openvpn_client_ping_packet_loss_ratio[10m]) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: {{ $value | humanizePercentage }} packet loss to {{ $labels.common_name }}"

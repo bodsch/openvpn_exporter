@@ -1,0 +1,138 @@
+package openvpn
+
+import (
+	"bufio"
+	"context"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fakeManagement emulates the OpenVPN management interface on l.
+func fakeManagement(t *testing.T, l net.Listener, password string) {
+	t.Helper()
+	status, err := os.ReadFile("testdata/status-v3.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go serveManagement(conn, password, string(status))
+		}
+	}()
+}
+
+func serveManagement(conn net.Conn, password, status string) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	w := func(s string) { _, _ = conn.Write([]byte(s)) }
+
+	if password != "" {
+		w(passwordPrompt)
+		line, _ := r.ReadString('\n')
+		if strings.TrimSpace(line) != password {
+			w("ERROR: bad password\r\n")
+			return
+		}
+		w("SUCCESS: password is correct\r\n")
+	}
+	w(">INFO:OpenVPN Management Interface Version 5 -- type 'help' for more info\r\n")
+
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		switch strings.TrimSpace(line) {
+		case "status 3":
+			// an asynchronous notification in between must be ignored
+			w(">HOLD:Waiting for hold release:0\r\n")
+			w(strings.ReplaceAll(status, "\n", "\r\n"))
+		case "load-stats":
+			w("SUCCESS: nclients=2,bytesin=1000,bytesout=2000\r\n")
+		case "quit":
+			return
+		default:
+			w("ERROR: unknown command, enter 'help' for more options\r\n")
+		}
+	}
+}
+
+func TestManagementClient(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "mgmt.sock")
+	unixL, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unixL.Close()
+	fakeManagement(t, unixL, "")
+
+	tcpL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpL.Close()
+	fakeManagement(t, tcpL, "s3cret")
+
+	tests := []struct {
+		name, address, password string
+		wantErr                 string
+	}{
+		{name: "unix", address: "unix://" + sock},
+		{name: "tcp with password", address: "tcp://" + tcpL.Addr().String(), password: "s3cret"},
+		{name: "wrong password", address: tcpL.Addr().String(), password: "wrong", wantErr: "bad password"},
+		{name: "missing password", address: tcpL.Addr().String(), wantErr: "requires a password"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewManagementClient(tt.address, tt.password, 2*time.Second)
+			st, load, err := c.Fetch(context.Background())
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(st.Clients) != 2 || st.Clients[1].CommonName != "laptop-bob" {
+				t.Errorf("clients = %+v", st.Clients)
+			}
+			if load.BytesIn != 1000 || load.BytesOut != 2000 || load.Clients != 2 {
+				t.Errorf("load = %+v", load)
+			}
+		})
+	}
+}
+
+func TestManagementClientTimeout(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		conn, err := l.Accept()
+		if err == nil {
+			defer conn.Close()
+			time.Sleep(2 * time.Second) // never says anything
+		}
+	}()
+
+	start := time.Now()
+	_, _, err = NewManagementClient(l.Addr().String(), "", 200*time.Millisecond).Fetch(context.Background())
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Fetch took %v", d)
+	}
+}

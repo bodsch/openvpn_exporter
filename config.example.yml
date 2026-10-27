@@ -1,0 +1,52 @@
+# openvpn_exporter configuration
+#
+# Each entry in "servers" is one OpenVPN server instance. All metrics carry
+# its name in the "server" label.
+
+servers:
+  - name: vpn-udp
+
+    # Source of the client list: either the management interface ...
+    #   OpenVPN server config:  management 127.0.0.1 7505 /etc/openvpn/server/mgmt.pass
+    #                      or:  management /run/openvpn/server.sock unix
+    management:
+      address: 127.0.0.1:7505              # or tcp://host:port, unix:///run/openvpn/server.sock
+      password_file: /etc/openvpn/server/mgmt.pass
+      # password: "..."                    # alternatively inline
+      timeout: 5s
+
+    # ... or a status file (only one of both per server)
+    #   OpenVPN server config:  status /run/openvpn/status.log 10
+    #                           status-version 3
+    # status_file: /run/openvpn/status.log
+
+    # Expiry of these certificates is exported. OpenVPN configs with inline
+    # <ca>/<cert> blocks work as well.
+    certificates:
+      - /etc/openvpn/server/server.crt
+      - /etc/openvpn/server/ca.crt
+
+    # CRLs used with "crl-verify". An expired CRL locks out ALL clients.
+    crls:
+      - /etc/openvpn/server/crl.pem
+
+    # Clients that should always be connected. Missing ones are exported as
+    # openvpn_client_connections{common_name="..."} 0.
+    expected_clients:
+      - filiale-01
+      - filiale-02
+
+    # ICMP reachability of clients through the tunnel.
+    ping:
+      connected_clients: true              # ping the virtual IP of every connected client
+      targets:                             # additional fixed addresses (e.g. via ifconfig-push)
+        - name: filiale-01
+          address: 10.8.0.10
+        - name: filiale-01-lan             # a host behind a site-to-site client (iroute)
+          address: 192.168.50.1
+      check_interval: 30s                  # pings run in the background; scrapes read the latest result
+      count: 3
+      interval: 200ms
+      timeout: 2s
+      privileged: false                    # true = raw socket, needs CAP_NET_RAW
+      concurrency: 16
