@@ -125,6 +125,7 @@ func newHandler(g prometheus.Gatherer, metricsPath string, maxRequests int, logg
 	}
 
 	mux := http.NewServeMux()
+
 	mux.HandleFunc(metricsPath, func(w http.ResponseWriter, r *http.Request) {
 		// The slot covers collecting only. promhttp's own limit also
 		// covers sending, so clients that never read the answer could
@@ -144,6 +145,7 @@ func newHandler(g prometheus.Gatherer, metricsPath string, maxRequests int, logg
 		}
 		buf.sendTo(w)
 	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -192,6 +194,7 @@ func serve(ctx context.Context, srv *http.Server, l net.Listener, webConfigFile 
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
+
 	flags := &web.FlagConfig{WebConfigFile: &webConfigFile}
 	if err := web.Serve(l, srv, flags, logger); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
