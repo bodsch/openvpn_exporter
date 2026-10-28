@@ -27,10 +27,15 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE)
 # exception — see the test target.
 export CGO_ENABLED := 0
 
-# Linux only for releases because that is what the collection deploys to.
-# Nothing in the source is linux-specific, so a developer's `make build` on
-# darwin works and is how the tests get run.
-PLATFORMS := linux/amd64 linux/arm64
+# Linux is what the collection deploys to; darwin/arm64 is released for
+# running the exporter from a workstation against a remote management port.
+PLATFORMS := linux/amd64 linux/arm64 darwin/arm64
+
+# Files packed next to the binary into every release archive.
+DIST_FILES := LICENSE README.md config.example.yml contrib/openvpn_exporter.service
+
+# sha256sum on Linux (CI), shasum on macOS; both write the same format.
+SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo 'shasum -a 256')
 
 GO       := go
 GOLANGCI := golangci-lint
@@ -132,7 +137,7 @@ tidy: ## Tidy and verify go.mod/go.sum.
 ci: fmt vet lint vuln test build ## Full CI pipeline: fmt, vet, lint, vuln, test (race), build.
 
 .PHONY: release
-release: ## Cross-compile static release binaries and copy the systemd units into dist/.
+release: ## Cross-compile static release binaries into dist/.
 	@mkdir -p $(DIST_DIR)
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
@@ -142,6 +147,26 @@ release: ## Cross-compile static release binaries and copy the systemd units int
 			GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $$out ./cmd/$$b/ || exit 1; \
 		done; \
 	done
+
+# One archive per platform, named <binary>-<version>-<os>-<arch>.tar.gz, with
+# the binary under its plain name, plus SHA256SUMS over all archives. This is
+# what the release workflow uploads, so a local `make dist` shows exactly what
+# a release will contain.
+.PHONY: dist
+dist: clean release ## Build release archives and SHA256SUMS into dist/.
+	@for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		for b in $(BINARIES); do \
+			name=$$b-$(VERSION)-$$os-$$arch; \
+			stage=$(DIST_DIR)/$$name; \
+			mkdir -p $$stage || exit 1; \
+			cp $(DIST_DIR)/$$b-$$os-$$arch $$stage/$$b && cp $(DIST_FILES) $$stage/ || exit 1; \
+			tar -C $(DIST_DIR) -czf $(DIST_DIR)/$$name.tar.gz $$name || exit 1; \
+			rm -rf $$stage $(DIST_DIR)/$$b-$$os-$$arch; \
+			echo "packed $(DIST_DIR)/$$name.tar.gz"; \
+		done; \
+	done
+	@cd $(DIST_DIR) && $(SHA256SUM) *.tar.gz > SHA256SUMS
 
 .PHONY: clean
 clean: ## Remove build artefacts.
