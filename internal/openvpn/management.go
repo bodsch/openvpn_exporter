@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -18,12 +17,14 @@ const passwordPrompt = "ENTER PASSWORD:"
 //
 // OpenVPN accepts only one management connection at a time, so every
 // Fetch opens a short-lived connection and requests are serialized.
+// Waiting for a running request counts against the timeout, so concurrent
+// scrapes cannot pile up behind a hanging management interface.
 type ManagementClient struct {
 	network  string
 	address  string
 	password string
 	timeout  time.Duration
-	mu       sync.Mutex
+	sem      chan struct{} // holds one token while a request is running
 }
 
 // NewManagementClient creates a client for address, which is "host:port",
@@ -38,16 +39,20 @@ func NewManagementClient(address, password string, timeout time.Duration) *Manag
 	case strings.HasPrefix(address, "tcp://"):
 		address = strings.TrimPrefix(address, "tcp://")
 	}
-	return &ManagementClient{network: network, address: address, password: password, timeout: timeout}
+	return &ManagementClient{network: network, address: address, password: password, timeout: timeout, sem: make(chan struct{}, 1)}
 }
 
 // Fetch reads "status 3" and "load-stats" from the management interface.
 func (m *ManagementClient) Fetch(ctx context.Context) (*Status, *LoadStats, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	ctx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
+
+	select {
+	case m.sem <- struct{}{}:
+		defer func() { <-m.sem }()
+	case <-ctx.Done():
+		return nil, nil, fmt.Errorf("waiting for running management request: %w", ctx.Err())
+	}
 
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, m.network, m.address)

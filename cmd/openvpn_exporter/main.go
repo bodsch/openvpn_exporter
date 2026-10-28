@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/exporter-toolkit/web"
 
 	"bodsch.me/openvpn_exporter/internal/collector"
 	"bodsch.me/openvpn_exporter/internal/config"
@@ -34,6 +35,8 @@ func main() {
 		configCheck   = flag.Bool("config.check", false, "Validate the configuration file and exit.")
 		listenAddress = flag.String("web.listen-address", ":9176", "Address to listen on for HTTP requests.")
 		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+		webConfigFile = flag.String("web.config.file", "", "Path to a web configuration file enabling TLS and/or basic authentication.")
+		maxRequests   = flag.Int("web.max-requests", 3, "Maximum number of parallel scrape requests; 0 disables the limit.")
 		logLevel      = flag.String("log.level", "info", "Log level: debug, info, warn or error.")
 		showVersion   = flag.Bool("version", false, "Print version and exit.")
 	)
@@ -56,6 +59,10 @@ func main() {
 		logger.Error("loading configuration failed", "file", *configFile, "err", err)
 		os.Exit(1)
 	}
+	if err := web.Validate(*webConfigFile); err != nil {
+		logger.Error("loading web configuration failed", "file", *webConfigFile, "err", err)
+		os.Exit(1)
+	}
 	if *configCheck {
 		fmt.Printf("configuration %s is valid (%d servers)\n", *configFile, len(cfg.Servers))
 		return
@@ -71,7 +78,10 @@ func main() {
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle(*metricsPath, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.Handle(*metricsPath, promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+		ErrorLog:            slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		MaxRequestsInFlight: *maxRequests,
+	}))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -83,9 +93,9 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:              *listenAddress,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -99,7 +109,13 @@ func main() {
 	}()
 
 	logger.Info("starting openvpn_exporter", "version", version, "build_date", buildDate, "address", *listenAddress, "servers", len(cfg.Servers))
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	systemdSocket := false
+	flags := &web.FlagConfig{
+		WebListenAddresses: &[]string{*listenAddress},
+		WebSystemdSocket:   &systemdSocket,
+		WebConfigFile:      webConfigFile,
+	}
+	if err := web.ListenAndServe(srv, flags, logger); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("HTTP server failed", "err", err)
 		os.Exit(1)
 	}

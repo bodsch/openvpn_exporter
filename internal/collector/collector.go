@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -32,6 +33,7 @@ var (
 	descUp            = desc("up", "Whether the OpenVPN status could be read (1) or not (0).", lServer)
 	descServerInfo    = desc("server_info", "OpenVPN server version.", []string{"server", "version"})
 	descUpdated       = desc("status_updated_timestamp_seconds", "Time the OpenVPN status was last updated by the server.", lServer)
+	descParseErrors   = desc("status_parse_errors", "Number of lines of the last status that could not be parsed and were skipped.", lServer)
 	descConnected     = desc("connected_clients", "Number of currently connected clients.", lServer)
 	descMaxQueue      = desc("max_bcast_mcast_queue_length", "Maximum length of the broadcast/multicast queue.", lServer)
 	descDCO           = desc("dco_enabled", "Whether data channel offload is enabled.", lServer)
@@ -116,7 +118,7 @@ func (c *Collector) Run(ctx context.Context) {
 // Describe implements prometheus.Collector.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{
-		descUp, descServerInfo, descUpdated, descConnected, descMaxQueue, descDCO,
+		descUp, descServerInfo, descUpdated, descParseErrors, descConnected, descMaxQueue, descDCO,
 		descServerRx, descServerTx, descClientConns, descClientInfo, descClientRx,
 		descClientTx, descClientSince, descClientLastRef, descCertNotAfter,
 		descCertNotBefore, descCRLNext, descCRLThis, descCRLRevoked, descTLSFileError,
@@ -175,6 +177,10 @@ func (c *Collector) collectStatus(ch chan<- prometheus.Metric, cfg config.Server
 	if !st.UpdatedAt.IsZero() {
 		ch <- gauge(descUpdated, unix(st.UpdatedAt), name)
 	}
+	if n := len(st.LineErrors); n > 0 {
+		c.logger.Warn("skipped unparsable status lines", "server", name, "count", n, "first", st.LineErrors[0])
+	}
+	ch <- gauge(descParseErrors, float64(len(st.LineErrors)), name)
 	ch <- gauge(descConnected, float64(len(st.Clients)), name)
 	if v, ok := st.GlobalStats["Max bcast/mcast queue length"]; ok {
 		ch <- gauge(descMaxQueue, v, name)
@@ -312,11 +318,23 @@ func collectPings(ch chan<- prometheus.Metric, server string, entries []probe.En
 }
 
 func gauge(d *prometheus.Desc, v float64, labels ...string) prometheus.Metric {
-	return prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, labels...)
+	return prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, validLabels(labels)...)
 }
 
 func counter(d *prometheus.Desc, v float64, labels ...string) prometheus.Metric {
-	return prometheus.MustNewConstMetric(d, prometheus.CounterValue, v, labels...)
+	return prometheus.MustNewConstMetric(d, prometheus.CounterValue, v, validLabels(labels)...)
+}
+
+// validLabels replaces invalid UTF-8 in label values, which come from the
+// status and certificates. MustNewConstMetric would panic on them, and the
+// panic in a collectServer goroutine would crash the exporter.
+func validLabels(labels []string) []string {
+	for i, l := range labels {
+		if !utf8.ValidString(l) {
+			labels[i] = strings.ToValidUTF8(l, "\uFFFD")
+		}
+	}
+	return labels
 }
 
 func unix(t time.Time) float64 {

@@ -67,7 +67,26 @@ openvpn_exporter --config.file=/etc/openvpn_exporter/config.yml   # :9176/metric
 | `--config.check` | Konfiguration prüfen und beenden |
 | `--web.listen-address` | `:9176` |
 | `--web.telemetry-path` | `/metrics` |
+| `--web.config.file` | leer (kein TLS, keine Auth) |
+| `--web.max-requests` | `3` (parallele Scrapes, `0` = unbegrenzt) |
 | `--log.level` | `info` |
+
+### TLS und Basic Auth
+
+Die Metriken enthalten Common Names, Client-IPs und Usernames. Ist der Port
+von außen erreichbar, sollte `--web.config.file` gesetzt werden. Das Format ist
+das der [Prometheus exporter-toolkit](https://github.com/prometheus/exporter-toolkit/blob/master/docs/web-configuration.md):
+
+```yaml
+# /etc/openvpn_exporter/web.yml
+tls_server_config:
+  cert_file: /etc/openvpn_exporter/tls.crt
+  key_file: /etc/openvpn_exporter/tls.key
+basic_auth_users:
+  prometheus: $2y$10$...   # bcrypt, z. B. htpasswd -nBC 10 "" | tr -d ':\n'
+```
+
+`--config.check` prüft die Web-Konfiguration mit.
 
 ### Ping
 
@@ -93,6 +112,7 @@ Alle Metriken tragen das Label `server`.
 | `openvpn_up` | | Status lesbar (1/0) |
 | `openvpn_server_info` | `version` | OpenVPN-Version |
 | `openvpn_status_updated_timestamp_seconds` | | Zeitpunkt des Status (Status-Datei veraltet?) |
+| `openvpn_status_parse_errors` | | Übersprungene, nicht lesbare Zeilen des letzten Status |
 | `openvpn_connected_clients` | | Anzahl verbundener Clients |
 | `openvpn_server_received_bytes_total` / `_sent_bytes_total` | | Gesamtverkehr (nur Management) |
 | `openvpn_max_bcast_mcast_queue_length`, `openvpn_dco_enabled` | | Globale Statistiken |
