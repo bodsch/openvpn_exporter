@@ -64,16 +64,13 @@ jobs:
       - name: Go version
         run: go version
 
-      - name: Build
-        run: go build ./...
+      # The tool versions are pinned in the Makefile, so CI and a local
+      # `make ci` run the same golangci-lint and govulncheck.
+      - name: Install golangci-lint
+        run: make lint-install
 
-      - name: Test
-        run: go test ./...
-
-      - name: Vulnerability scan (govulncheck)
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-          govulncheck ./...
+      - name: fmt, vet, lint, vuln, test (race), build
+        run: make ci
 
   # Builds with the Makefile (the same `make dist` that runs locally) and
   # publishes with the preinstalled gh CLI, so no third-party action gets
