@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -70,11 +71,7 @@ func main() {
 	}
 
 	col := collector.New(cfg, logger)
-	srv := &http.Server{
-		Handler:           newHandler(newRegistry(col), *metricsPath, *maxRequests, logger),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
+	srv := newServer(newHandler(newRegistry(col), *metricsPath, *maxRequests, logger))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -92,6 +89,18 @@ func main() {
 	}
 }
 
+// newServer bounds every phase of a connection, so that slow or idle
+// clients cannot hold goroutines and buffered scrapes indefinitely.
+// WriteTimeout covers collecting and sending a scrape.
+func newServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+}
+
 func newRegistry(col prometheus.Collector) *prometheus.Registry {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
@@ -104,13 +113,37 @@ func newRegistry(col prometheus.Collector) *prometheus.Registry {
 }
 
 // newHandler serves the metrics of g under metricsPath, with at most
-// maxRequests scrapes in parallel (0 = unlimited), and a landing page.
+// maxRequests scrapes collecting in parallel (0 = unlimited), and a
+// landing page.
 func newHandler(g prometheus.Gatherer, metricsPath string, maxRequests int, logger *slog.Logger) http.Handler {
+	metrics := promhttp.HandlerFor(g, promhttp.HandlerOpts{
+		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	})
+	var slots chan struct{}
+	if maxRequests > 0 {
+		slots = make(chan struct{}, maxRequests)
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle(metricsPath, promhttp.HandlerFor(g, promhttp.HandlerOpts{
-		ErrorLog:            slog.NewLogLogger(logger.Handler(), slog.LevelError),
-		MaxRequestsInFlight: maxRequests,
-	}))
+	mux.HandleFunc(metricsPath, func(w http.ResponseWriter, r *http.Request) {
+		// The slot covers collecting only. promhttp's own limit also
+		// covers sending, so clients that never read the answer could
+		// hold every slot and make all scrapes fail with 503.
+		if slots != nil {
+			select {
+			case slots <- struct{}{}:
+			default:
+				http.Error(w, "too many concurrent scrapes", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		buf := &bufferedResponse{header: w.Header()}
+		metrics.ServeHTTP(buf, r)
+		if slots != nil {
+			<-slots
+		}
+		buf.sendTo(w)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -121,6 +154,33 @@ func newHandler(g prometheus.Gatherer, metricsPath string, maxRequests int, logg
 <h1>OpenVPN Exporter</h1><p><a href="%s">Metrics</a></p></body></html>`, metricsPath)
 	})
 	return mux
+}
+
+// bufferedResponse collects a response, so that it can be sent after the
+// scrape slot is released. Headers go straight to the real response.
+type bufferedResponse struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (b *bufferedResponse) Header() http.Header { return b.header }
+
+func (b *bufferedResponse) WriteHeader(code int) {
+	if b.code == 0 {
+		b.code = code
+	}
+}
+
+func (b *bufferedResponse) Write(p []byte) (int, error) {
+	b.WriteHeader(http.StatusOK)
+	return b.body.Write(p)
+}
+
+func (b *bufferedResponse) sendTo(w http.ResponseWriter) {
+	b.WriteHeader(http.StatusOK)
+	w.WriteHeader(b.code)
+	_, _ = b.body.WriteTo(w)
 }
 
 // serve serves srv on l until ctx is cancelled, with TLS and basic auth
