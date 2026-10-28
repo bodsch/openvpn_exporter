@@ -279,17 +279,27 @@ func TestSlowReadersDoNotBlockScrapes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	time.Sleep(500 * time.Millisecond) // let the slow scrapes start writing
-
+	// While a slow request is still collecting, its slot is rightly taken
+	// and 503 is correct; on a loaded CI runner under -race that takes
+	// seconds. So retry: once the slow requests only send, the slot must
+	// be free. Had they kept it, every retry would get 503 until the
+	// deadline.
 	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("http://" + l.Addr().String() + "/metrics")
-	if err != nil {
-		t.Fatalf("scrape next to slow readers: %v", err)
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("scrape next to slow readers: %d, want 200; the readers hold the scrape slot", resp.StatusCode)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		resp, err := client.Get("http://" + l.Addr().String() + "/metrics")
+		if err != nil {
+			t.Fatalf("scrape next to slow readers: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scrape next to slow readers: still %d after 15s, want 200; the readers hold the scrape slot", resp.StatusCode)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
