@@ -1,11 +1,7 @@
-# mail-monkey Makefile
+# openvpn_exporter Makefile
 #
 # All build/test/quality logic lives here so CI configs stay thin wrappers that
 # only invoke `make` targets.
-#
-# The house style is the one of the mailcow ports in the sibling directories,
-# with two differences: this repository builds two binaries from one module, and
-# it has no `image` target — mail-monkey does not use Docker.
 
 BINARIES := openvpn_exporter
 
@@ -60,7 +56,7 @@ help: ## Show this help.
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## Build both binaries into bin/.
+build: ## Build the binary into bin/.
 	@mkdir -p $(BIN_DIR)
 	@for b in $(BINARIES); do \
 		echo "building $(BIN_DIR)/$$b"; \
@@ -87,8 +83,7 @@ bench: ## Run micro-benchmarks (no tests) with allocation stats.
 
 # The directory list comes from `go list` rather than being spelled out: a fixed
 # `gofmt -l cmd internal` reports a missing directory on stderr and then exits
-# 0, so it passes while checking nothing. This also keeps the symlinked
-# original/ out of it, which holds no Go but plenty of files.
+# 0, so it passes while checking nothing.
 .PHONY: fmt
 fmt: ## Fail if anything is not gofmt-clean.
 	@dirs="$$($(GO) list -f '{{.Dir}}' ./... 2>/dev/null)"; \
@@ -97,17 +92,8 @@ fmt: ## Fail if anything is not gofmt-clean.
 	if [ -n "$$out" ]; then echo "not gofmt-clean:"; echo "$$out"; echo "run 'gofmt -w $$dirs'."; exit 1; fi
 
 .PHONY: vet
-vet: ## Run go vet, including the integration-tagged files.
+vet: ## Run go vet.
 	$(GO) vet ./...
-	# The integration tests are behind a build tag, so `go test` and `go vet`
-	# without it do not even COMPILE them — an API change breaks them and CI
-	# stays green until somebody runs the suite against a real MariaDB, which
-	# is not on every push.
-	#
-	# Found the direct way: MTA-STS moved from one field to another, `make ci`
-	# passed, and internal/service/pebble_integration_test.go had not compiled
-	# for an hour. Vetting with the tag costs a second and needs no database.
-	$(GO) vet -tags integration ./...
 
 .PHONY: lint
 lint: ## Run golangci-lint (uses .golangci.yml if present).
@@ -171,26 +157,3 @@ dist: clean release ## Build release archives and SHA256SUMS into dist/.
 .PHONY: clean
 clean: ## Remove build artefacts.
 	rm -rf $(BIN_DIR) $(DIST_DIR) coverage.out
-#
-#
-#
-#
-# VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-# LDFLAGS := -s -w -X main.version=$(VERSION)
-# BIN     :=
-#
-# .PHONY: all build test lint clean
-#
-# all: lint test build
-#
-# build:
-# 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/openvpn_exporter
-#
-# test:
-# 	go test -race ./...
-#
-# lint:
-# 	golangci-lint run ./...
-#
-# clean:
-# 	rm -f $(BIN)
