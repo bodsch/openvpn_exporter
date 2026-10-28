@@ -80,12 +80,16 @@ type row struct {
 	fields []string
 }
 
+// get returns a field with invalid UTF-8 replaced. Fields become label
+// values, which must be valid UTF-8; repairing them here, before clients
+// are aggregated by common name, keeps two names that differ only in
+// invalid bytes from producing the same series twice.
 func (r row) get(name string) string {
 	i, ok := r.cols[name]
 	if !ok || i >= len(r.fields) {
 		return ""
 	}
-	return r.fields[i]
+	return strings.ToValidUTF8(r.fields[i], "�")
 }
 
 func (r row) time(textCol, unixCol string) (time.Time, error) {
