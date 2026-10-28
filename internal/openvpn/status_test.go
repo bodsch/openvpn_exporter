@@ -156,13 +156,16 @@ func (r repeatReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func endlessStatus() io.Reader {
+// oversizedStatus is a valid status twice as large as maxStatusSize. It is
+// finite, so that a missing limit makes the tests fail instead of hang.
+func oversizedStatus() io.Reader {
 	return io.MultiReader(strings.NewReader("TITLE,x\n"),
-		repeatReader{[]byte("GLOBAL_STATS," + strings.Repeat("x", 4000) + ",1\n")})
+		io.LimitReader(repeatReader{[]byte("GLOBAL_STATS," + strings.Repeat("x", 4000) + ",1\n")}, 2*maxStatusSize),
+		strings.NewReader("\nEND\n"))
 }
 
 func TestParseStatusTooLarge(t *testing.T) {
-	if _, err := ParseStatus(endlessStatus()); !errors.Is(err, errStatusTooLarge) {
+	if _, err := ParseStatus(oversizedStatus()); !errors.Is(err, errStatusTooLarge) {
 		t.Fatalf("err = %v", err)
 	}
 }

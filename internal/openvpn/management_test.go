@@ -11,11 +11,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-// fakeManagement emulates the OpenVPN management interface on l.
+// fakeManagement emulates the OpenVPN management interface on l. Like
+// OpenVPN 2.6 it serves one connection at a time: a second one is
+// accepted by the kernel but gets no banner until the first is closed.
+// Do not serve concurrently here; that would hide a client that opens
+// parallel connections, which against a real server hang until timeout.
 func fakeManagement(t *testing.T, l net.Listener, password string) {
 	t.Helper()
 	status, err := os.ReadFile("testdata/status-v3.log")
@@ -28,7 +33,7 @@ func fakeManagement(t *testing.T, l net.Listener, password string) {
 			if err != nil {
 				return
 			}
-			go serveManagement(conn, password, string(status))
+			serveManagement(conn, password, string(status))
 		}
 	}()
 }
@@ -217,8 +222,61 @@ func TestMultiLineTooLarge(t *testing.T) {
 	defer c1.Close()
 	defer c2.Close()
 	go func() { _, _ = io.Copy(io.Discard, c2) }() // swallow the command
-	s := &session{conn: c1, r: newReader(endlessStatus())}
+	s := &session{conn: c1, r: newReader(oversizedStatus())}
 	if _, err := s.multiLine("status 3"); !errors.Is(err, errStatusTooLarge) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestManagementClientSerializes: OpenVPN serves one management connection
+// at a time and leaves a second one silent. A client that scraped in
+// parallel, e.g. for two Prometheus replicas, would see every second
+// scrape hang until its timeout and report the server as down.
+func TestManagementClientSerializes(t *testing.T) {
+	status, err := os.ReadFile("testdata/status-v3.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// This fake serves concurrently on purpose, to observe overlap.
+	var mu sync.Mutex
+	active, maxActive := 0, 0
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				mu.Lock()
+				active++
+				maxActive = max(maxActive, active)
+				mu.Unlock()
+				time.Sleep(20 * time.Millisecond) // a scrape takes a moment
+				serveManagement(conn, "", string(status))
+				mu.Lock()
+				active--
+				mu.Unlock()
+			}()
+		}
+	}()
+
+	c := NewManagementClient(l.Addr().String(), "", 2*time.Second)
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Go(func() {
+			if _, _, err := c.Fetch(context.Background()); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if maxActive != 1 {
+		t.Errorf("%d management connections open at once, want 1", maxActive)
 	}
 }

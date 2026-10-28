@@ -107,7 +107,30 @@ func TestCache(t *testing.T) {
 		t.Errorf("reloaded certs = %+v, err = %v", certs, err)
 	}
 
-	// Errors are not cached, and a vanished file is an error.
+	// A replacement that does not parse is an error, not the old value:
+	// a renewed certificate written half-way must show up as
+	// tls_file_error 1, not keep reporting the expiry of its predecessor.
+	if err := os.WriteFile(tf.Server, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tf.Server, fi.ModTime().Add(2*time.Second), fi.ModTime().Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if certs, err := c.Certificates(tf.Server); err == nil {
+		t.Errorf("broken replacement: got %+v from the cache, want an error", certs)
+	}
+	// ... and the error is not cached either: once repaired, it is read again.
+	if err := os.WriteFile(tf.Server, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tf.Server, fi.ModTime().Add(3*time.Second), fi.ModTime().Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Certificates(tf.Server); err != nil {
+		t.Errorf("repaired file: %v", err)
+	}
+
+	// A vanished file is an error.
 	if err := os.Remove(tf.CRL); err != nil {
 		t.Fatal(err)
 	}

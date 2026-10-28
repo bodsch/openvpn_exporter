@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -110,5 +111,42 @@ func TestProberPingsOnlyNewTargets(t *testing.T) {
 	}
 	if n := pinged("10.0.0.2"); n != 1 {
 		t.Errorf("10.0.0.2 pinged %d times, want 1", n)
+	}
+}
+
+// TestProberConcurrency: at most concurrency pings run at once. Without the
+// limit a server with 500 connected clients would open 500 ICMP sockets in
+// the same instant at every check_interval.
+func TestProberConcurrency(t *testing.T) {
+	var mu sync.Mutex
+	active, maxActive, done := 0, 0, 0
+	ping := func(_ context.Context, _ string, opts Options) (Result, error) {
+		mu.Lock()
+		active++
+		maxActive = max(maxActive, active)
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		mu.Lock()
+		active--
+		done++
+		mu.Unlock()
+		return Result{Sent: opts.Count}, nil
+	}
+	p := NewProber(Options{Count: 1, Timeout: time.Second}, time.Hour, 3, ping, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var targets []Target
+	for i := range 20 {
+		addr := fmt.Sprintf("10.0.0.%d", i+1)
+		targets = append(targets, Target{Name: addr, Address: addr})
+	}
+	p.SetTargets(targets)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	waitFor(t, "all pings", func() bool { mu.Lock(); defer mu.Unlock(); return done >= 20 })
+	mu.Lock()
+	defer mu.Unlock()
+	if maxActive > 3 {
+		t.Errorf("%d pings at once, want at most 3", maxActive)
 	}
 }

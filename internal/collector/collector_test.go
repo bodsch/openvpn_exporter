@@ -368,7 +368,51 @@ openvpn_client_connections{common_name="v6only",server="a"} 1
 openvpn_status_parse_errors{server="a"} 1
 openvpn_status_parse_errors{server="b"} 0
 `
-	if err := testutil.CollectAndCompare(c, strings.NewReader(want), "openvpn_client_connections", "openvpn_status_parse_errors"); err != nil {
+	// The alert rule relies on it: skipped lines do not mark the server down.
+	want += `
+# HELP openvpn_up Whether the OpenVPN status could be read (1) or not (0).
+# TYPE openvpn_up gauge
+openvpn_up{server="a"} 1
+openvpn_up{server="b"} 1
+`
+	if err := testutil.CollectAndCompare(c, strings.NewReader(want), "openvpn_client_connections", "openvpn_status_parse_errors", "openvpn_up"); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestPingTargetsSurviveStatusOutage: while the status cannot be read, for
+// example during an OpenVPN restart, the clients connected last keep being
+// pinged. Otherwise their ping metrics would vanish exactly when the
+// server is in trouble, and ping alerts would resolve instead of fire.
+func TestPingTargetsSurviveStatusOutage(t *testing.T) {
+	statusFile := filepath.Join(t.TempDir(), "status.log")
+	data, err := os.ReadFile("../openvpn/testdata/status-v3.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statusFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := newTestCollector(t, fmt.Sprintf(`
+servers:
+  - name: main
+    status_file: %q
+    ping: {connected_clients: true}
+`, statusFile))
+	scrapeUntilPinged(t, c, 2)
+
+	if err := os.Remove(statusFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.CollectAndCompare(c, strings.NewReader(`
+# HELP openvpn_up Whether the OpenVPN status could be read (1) or not (0).
+# TYPE openvpn_up gauge
+openvpn_up{server="main"} 0
+# HELP openvpn_client_ping_success Whether the client answered at least one ICMP echo request.
+# TYPE openvpn_client_ping_success gauge
+openvpn_client_ping_success{address="10.8.0.10",common_name="laptop-bob",server="main"} 1
+openvpn_client_ping_success{address="10.8.0.6",common_name="filiale-01",server="main"} 1
+`), "openvpn_up", "openvpn_client_ping_success"); err != nil {
 		t.Error(err)
 	}
 }
