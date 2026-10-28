@@ -13,21 +13,42 @@ SupplementaryGroups=openvpn
 ExecStart=/usr/local/bin/openvpn_exporter --config.file=/etc/openvpn_exporter/config.yml
 Restart=on-failure
 
+# No capabilities at all by default.
+CapabilityBoundingSet=
 # Only needed with "ping.privileged: true", i.e. when
 # net.ipv4.ping_group_range does not allow unprivileged ICMP sockets.
+# These lines must stay below the empty CapabilityBoundingSet= above.
 #AmbientCapabilities=CAP_NET_RAW
 #CapabilityBoundingSet=CAP_NET_RAW
 
 NoNewPrivileges=yes
+UMask=0077
+
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateDevices=yes
+# Hides other processes; the exporter only reads /proc/self.
+ProtectProc=invisible
+ProtectHostname=yes
+ProtectClock=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+
+# AF_UNIX for a management socket, AF_NETLINK for Go's interface lookups.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
