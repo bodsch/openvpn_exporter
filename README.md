@@ -37,6 +37,13 @@ Mit der Option nimmt OpenVPN nur Verbindungen von Prozessen dieser Gruppe an; ge
 `/run/openvpn-server/` mit `0710 root:root` an, dort kommt der Exporter nicht hin
 (`connect: permission denied`).
 
+OpenVPN prüft nur die **primäre** Gruppe des Exporter-Prozesses. `SupplementaryGroups=` reicht
+nicht; OpenVPN trennt dann sofort (`GID of socket peer … doesn't match required value`), der
+Exporter meldet `reading from management interface: EOF`. Die Gruppe muss existieren, bevor
+OpenVPN startet, sonst bricht es mit `failed to find GID for group` ab. Legen OpenVPN- und
+Exporter-Installation sie beide idempotent an, spielt die Reihenfolge keine Rolle. OpenVPN löst
+den Namen beim Start auf: Wird die Gruppe danach mit neuer GID angelegt, OpenVPN neu starten.
+
 OpenVPN erlaubt **nur eine** Management-Verbindung gleichzeitig. Der Exporter verbindet sich pro
 Scrape kurz und trennt sofort wieder; Abfragen pro Server werden serialisiert.
 
