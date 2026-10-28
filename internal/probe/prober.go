@@ -100,27 +100,34 @@ func (p *Prober) Results() []Entry {
 	return entries
 }
 
-// Run pings all targets every interval and whenever new targets appear,
-// until ctx is cancelled.
+// Run pings all targets every interval until ctx is cancelled. Targets
+// that appear in between are pinged right away, without the others.
 func (p *Prober) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.every)
 	defer ticker.Stop()
 
+	onlyNew := false
 	for {
-		p.round(ctx)
+		p.round(ctx, onlyNew)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			onlyNew = false
 		case <-p.trigger:
+			onlyNew = true
 		}
 	}
 }
 
-func (p *Prober) round(ctx context.Context) {
+// round pings all targets, or with onlyNew those without a result yet.
+func (p *Prober) round(ctx context.Context, onlyNew bool) {
 	p.mu.Lock()
 	targets := make([]Target, 0, len(p.targets))
 	for addr, name := range p.targets {
+		if _, ok := p.results[addr]; onlyNew && ok {
+			continue
+		}
 		targets = append(targets, Target{Name: name, Address: addr})
 	}
 	p.mu.Unlock()

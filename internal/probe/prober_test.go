@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 )
@@ -70,5 +71,44 @@ func TestProber(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run did not stop after cancel")
+	}
+}
+
+func TestProberPingsOnlyNewTargets(t *testing.T) {
+	var mu sync.Mutex
+	count := map[string]int{}
+	ping := func(_ context.Context, addr string, opts Options) (Result, error) {
+		mu.Lock()
+		count[addr]++
+		mu.Unlock()
+		return Result{Sent: opts.Count, Received: opts.Count}, nil
+	}
+	pinged := func(addr string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return count[addr]
+	}
+
+	p := NewProber(Options{Count: 1, Timeout: time.Second}, time.Hour, 4, ping, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	p.SetTargets([]Target{{Name: "a", Address: "10.0.0.1"}})
+	waitFor(t, "first result", func() bool { return len(p.Results()) == 1 })
+	for i, addr := range []string{"10.0.0.2", "10.0.0.3"} {
+		targets := []Target{{Name: "a", Address: "10.0.0.1"}}
+		for _, a := range []string{"10.0.0.2", "10.0.0.3"}[:i+1] {
+			targets = append(targets, Target{Name: a, Address: a})
+		}
+		p.SetTargets(targets)
+		waitFor(t, addr, func() bool { return pinged(addr) == 1 })
+	}
+
+	if n := pinged("10.0.0.1"); n != 1 {
+		t.Errorf("existing target pinged %d times on new targets, want 1", n)
+	}
+	if n := pinged("10.0.0.2"); n != 1 {
+		t.Errorf("10.0.0.2 pinged %d times, want 1", n)
 	}
 }
