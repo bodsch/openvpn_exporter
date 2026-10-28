@@ -2,16 +2,24 @@ package openvpn
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-// fakeManagement emulates the OpenVPN management interface on l.
+// fakeManagement emulates the OpenVPN management interface on l. Like
+// OpenVPN 2.6 it serves one connection at a time: a second one is
+// accepted by the kernel but gets no banner until the first is closed.
+// Do not serve concurrently here; a real server does not either.
 func fakeManagement(t *testing.T, l net.Listener, password string) {
 	t.Helper()
 	status, err := os.ReadFile("testdata/status-v3.log")
@@ -24,7 +32,7 @@ func fakeManagement(t *testing.T, l net.Listener, password string) {
 			if err != nil {
 				return
 			}
-			go serveManagement(conn, password, string(status))
+			serveManagement(conn, password, string(status))
 		}
 	}()
 }
@@ -37,7 +45,11 @@ func serveManagement(conn net.Conn, password, status string) {
 	if password != "" {
 		w(passwordPrompt)
 		line, _ := r.ReadString('\n')
-		if strings.TrimSpace(line) != password {
+		switch strings.TrimSpace(line) {
+		case password:
+		case "silent":
+			return // like OpenVPN 2.6: close without a message
+		default:
 			w("ERROR: bad password\r\n")
 			return
 		}
@@ -88,6 +100,7 @@ func TestManagementClient(t *testing.T) {
 		{name: "unix", address: "unix://" + sock},
 		{name: "tcp with password", address: "tcp://" + tcpL.Addr().String(), password: "s3cret"},
 		{name: "wrong password", address: tcpL.Addr().String(), password: "wrong", wantErr: "bad password"},
+		{name: "rejected password", address: tcpL.Addr().String(), password: "silent", wantErr: "wrong password?"},
 		{name: "missing password", address: tcpL.Addr().String(), wantErr: "requires a password"},
 	}
 	for _, tt := range tests {
@@ -168,4 +181,106 @@ func TestManagementClientWaitTimeout(t *testing.T) {
 	if d := time.Since(start); d > 600*time.Millisecond {
 		t.Errorf("concurrent Fetch calls took %v", d)
 	}
+}
+
+// BenchmarkReadLines reads a "status 3" answer of 5000 clients.
+func BenchmarkReadLines(b *testing.B) {
+	var sb strings.Builder
+	for i := range 5000 {
+		fmt.Fprintf(&sb, "CLIENT_LIST\tclient-%d\t203.0.113.%d:%d\t10.8.%d.%d\t\t123456789\t987654321\t2026-10-28 10:00:00\t1793181600\tUNDEF\t%d\t%d\tAES-256-GCM\r\n",
+			i, i%256, 40000+i, i/256, i%256, i, i)
+	}
+	sb.WriteString("END\r\n")
+	data := []byte(sb.String())
+	b.SetBytes(int64(len(data)))
+
+	for b.Loop() {
+		s := &session{r: newReader(bytes.NewReader(data))}
+		for {
+			line, err := s.readLine()
+			if err != nil {
+				b.Fatal(err)
+			}
+			if line == "END" {
+				break
+			}
+		}
+	}
+}
+
+func TestReadLineTooLong(t *testing.T) {
+	in := strings.Repeat("x", maxLineLength+1) + "\n"
+	s := &session{r: newReader(strings.NewReader(in))}
+	if _, err := s.readLine(); err == nil || !strings.Contains(err.Error(), "line longer than") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMultiLineTooLarge(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	go func() { _, _ = io.Copy(io.Discard, c2) }() // swallow the command
+	s := &session{conn: c1, r: newReader(oversizedStatus())}
+	if _, err := s.multiLine("status 3"); !errors.Is(err, errStatusTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestManagementClientSerializes: requests are serialized, as the README
+// says. OpenVPN serves one management connection at a time and leaves a
+// second one silent until the first is closed, so parallel connections
+// would only queue there, invisibly. Serialized in the client, the wait
+// counts against the timeout and fails with a clear error.
+//
+// Open connections are counted on the client side, at dial and Close: a
+// fake server only notices a close when its goroutine gets scheduled, and
+// on a busy CI runner it saw an overlap the client never had.
+func TestManagementClientSerializes(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	fakeManagement(t, l, "")
+
+	c := NewManagementClient(l.Addr().String(), "", 2*time.Second)
+	var mu sync.Mutex
+	open, maxOpen := 0, 0
+	dial := c.dial
+	c.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		open++
+		maxOpen = max(maxOpen, open)
+		mu.Unlock()
+		return &countedConn{Conn: conn, close: func() { mu.Lock(); open--; mu.Unlock() }}, nil
+	}
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Go(func() {
+			if _, _, err := c.Fetch(context.Background()); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if maxOpen != 1 {
+		t.Errorf("%d management connections open at once, want 1", maxOpen)
+	}
+}
+
+type countedConn struct {
+	net.Conn
+	once  sync.Once
+	close func()
+}
+
+func (c *countedConn) Close() error {
+	c.once.Do(c.close)
+	return c.Conn.Close()
 }

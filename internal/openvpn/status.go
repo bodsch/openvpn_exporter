@@ -80,12 +80,16 @@ type row struct {
 	fields []string
 }
 
+// get returns a field with invalid UTF-8 replaced. Fields become label
+// values, which must be valid UTF-8; repairing them here, before clients
+// are aggregated by common name, keeps two names that differ only in
+// invalid bytes from producing the same series twice.
 func (r row) get(name string) string {
 	i, ok := r.cols[name]
 	if !ok || i >= len(r.fields) {
 		return ""
 	}
-	return r.fields[i]
+	return strings.ToValidUTF8(r.fields[i], "�")
 }
 
 func (r row) time(textCol, unixCol string) (time.Time, error) {
@@ -115,12 +119,24 @@ func parseTime(v string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unknown time format %q", v)
 }
 
+// maxStatusSize bounds the status read from a file or the management
+// interface. A status of 10000 clients is a few MB.
+const maxStatusSize = 64 << 20
+
+var errStatusTooLarge = fmt.Errorf("status larger than %d MiB", maxStatusSize>>20)
+
 // ParseStatus parses OpenVPN status output in version 1, 2 or 3 format.
 func ParseStatus(r io.Reader) (*Status, error) {
-	var lines []string
+	var (
+		lines []string
+		size  int
+	)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
+		if size += len(sc.Bytes()) + 1; size > maxStatusSize {
+			return nil, errStatusTooLarge
+		}
 		lines = append(lines, strings.TrimRight(sc.Text(), "\r"))
 	}
 	if err := sc.Err(); err != nil {

@@ -1,11 +1,7 @@
-# mail-monkey Makefile
+# openvpn_exporter Makefile
 #
 # All build/test/quality logic lives here so CI configs stay thin wrappers that
 # only invoke `make` targets.
-#
-# The house style is the one of the mailcow ports in the sibling directories,
-# with two differences: this repository builds two binaries from one module, and
-# it has no `image` target — mail-monkey does not use Docker.
 
 BINARIES := openvpn_exporter
 
@@ -27,10 +23,15 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE)
 # exception — see the test target.
 export CGO_ENABLED := 0
 
-# Linux only for releases because that is what the collection deploys to.
-# Nothing in the source is linux-specific, so a developer's `make build` on
-# darwin works and is how the tests get run.
-PLATFORMS := linux/amd64 linux/arm64
+# Linux is what the collection deploys to; darwin/arm64 is released for
+# running the exporter from a workstation against a remote management port.
+PLATFORMS := linux/amd64 linux/arm64 darwin/arm64
+
+# Files packed next to the binary into every release archive.
+DIST_FILES := LICENSE README.md config.example.yml contrib/openvpn_exporter.service
+
+# sha256sum on Linux (CI), shasum on macOS; both write the same format.
+SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo 'shasum -a 256')
 
 GO       := go
 GOLANGCI := golangci-lint
@@ -43,6 +44,10 @@ GOLANGCI := golangci-lint
 # variant, so a macOS run never saw it. One pin, one place.
 GOLANGCI_VERSION := v2.14.0
 
+# Pinned like golangci-lint, and the same version as in the CI workflow, so
+# a new release cannot turn a pipeline red that passed locally.
+GOVULNCHECK_VERSION := v1.9.0
+
 .DEFAULT_GOAL := build
 
 .PHONY: help
@@ -51,7 +56,7 @@ help: ## Show this help.
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## Build both binaries into bin/.
+build: ## Build the binary into bin/.
 	@mkdir -p $(BIN_DIR)
 	@for b in $(BINARIES); do \
 		echo "building $(BIN_DIR)/$$b"; \
@@ -78,8 +83,7 @@ bench: ## Run micro-benchmarks (no tests) with allocation stats.
 
 # The directory list comes from `go list` rather than being spelled out: a fixed
 # `gofmt -l cmd internal` reports a missing directory on stderr and then exits
-# 0, so it passes while checking nothing. This also keeps the symlinked
-# original/ out of it, which holds no Go but plenty of files.
+# 0, so it passes while checking nothing.
 .PHONY: fmt
 fmt: ## Fail if anything is not gofmt-clean.
 	@dirs="$$($(GO) list -f '{{.Dir}}' ./... 2>/dev/null)"; \
@@ -88,17 +92,8 @@ fmt: ## Fail if anything is not gofmt-clean.
 	if [ -n "$$out" ]; then echo "not gofmt-clean:"; echo "$$out"; echo "run 'gofmt -w $$dirs'."; exit 1; fi
 
 .PHONY: vet
-vet: ## Run go vet, including the integration-tagged files.
+vet: ## Run go vet.
 	$(GO) vet ./...
-	# The integration tests are behind a build tag, so `go test` and `go vet`
-	# without it do not even COMPILE them — an API change breaks them and CI
-	# stays green until somebody runs the suite against a real MariaDB, which
-	# is not on every push.
-	#
-	# Found the direct way: MTA-STS moved from one field to another, `make ci`
-	# passed, and internal/service/pebble_integration_test.go had not compiled
-	# for an hour. Vetting with the tag costs a second and needs no database.
-	$(GO) vet -tags integration ./...
 
 .PHONY: lint
 lint: ## Run golangci-lint (uses .golangci.yml if present).
@@ -114,7 +109,7 @@ lint-install: ## Install the pinned golangci-lint (what CI runs).
 
 .PHONY: vuln
 vuln: ## Scan deps and reachable code for known vulnerabilities (govulncheck).
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 .PHONY: sec
 sec: lint vuln ## Security checks: golangci-lint (incl. gosec) + govulncheck.
@@ -128,7 +123,7 @@ tidy: ## Tidy and verify go.mod/go.sum.
 ci: fmt vet lint vuln test build ## Full CI pipeline: fmt, vet, lint, vuln, test (race), build.
 
 .PHONY: release
-release: ## Cross-compile static release binaries and copy the systemd units into dist/.
+release: ## Cross-compile static release binaries into dist/.
 	@mkdir -p $(DIST_DIR)
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
@@ -139,29 +134,26 @@ release: ## Cross-compile static release binaries and copy the systemd units int
 		done; \
 	done
 
+# One archive per platform, named <binary>-<version>-<os>-<arch>.tar.gz, with
+# the binary under its plain name, plus SHA256SUMS over all archives. This is
+# what the release workflow uploads, so a local `make dist` shows exactly what
+# a release will contain.
+.PHONY: dist
+dist: clean release ## Build release archives and SHA256SUMS into dist/.
+	@for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		for b in $(BINARIES); do \
+			name=$$b-$(VERSION)-$$os-$$arch; \
+			stage=$(DIST_DIR)/$$name; \
+			mkdir -p $$stage || exit 1; \
+			cp $(DIST_DIR)/$$b-$$os-$$arch $$stage/$$b && cp $(DIST_FILES) $$stage/ || exit 1; \
+			tar -C $(DIST_DIR) -czf $(DIST_DIR)/$$name.tar.gz $$name || exit 1; \
+			rm -rf $$stage $(DIST_DIR)/$$b-$$os-$$arch; \
+			echo "packed $(DIST_DIR)/$$name.tar.gz"; \
+		done; \
+	done
+	@cd $(DIST_DIR) && $(SHA256SUM) *.tar.gz > SHA256SUMS
+
 .PHONY: clean
 clean: ## Remove build artefacts.
 	rm -rf $(BIN_DIR) $(DIST_DIR) coverage.out
-#
-#
-#
-#
-# VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-# LDFLAGS := -s -w -X main.version=$(VERSION)
-# BIN     :=
-#
-# .PHONY: all build test lint clean
-#
-# all: lint test build
-#
-# build:
-# 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/openvpn_exporter
-#
-# test:
-# 	go test -race ./...
-#
-# lint:
-# 	golangci-lint run ./...
-#
-# clean:
-# 	rm -f $(BIN)

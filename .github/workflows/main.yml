@@ -26,7 +26,6 @@ on:
     tags:
       - "*.*.*"
     paths-ignore:
-      - "Makefile"
       - "README.md"
 
   pull_request:
@@ -35,14 +34,12 @@ on:
       - "feature/**"
       - "!doc/**"
     paths-ignore:
-      - "Makefile"
       - "README.md"
 
 jobs:
   verify:
     name: "verify (go ${{ matrix.go }})"
     runs-on: ubuntu-22.04
-    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     strategy:
       fail-fast: false
       matrix:
@@ -53,10 +50,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # a manual release verifies the tag it publishes, not the branch
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -64,62 +64,52 @@ jobs:
       - name: Go version
         run: go version
 
-      - name: Build
-        run: go build ./...
+      # The tool versions are pinned in the Makefile, so CI and a local
+      # `make ci` run the same golangci-lint and govulncheck.
+      - name: Install golangci-lint
+        run: make lint-install
 
-      - name: Test
-        run: go test ./...
+      - name: fmt, vet, lint, vuln, test (race), build
+        run: make ci
 
-      - name: Vulnerability scan (govulncheck)
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-
+  # Builds with the Makefile (the same `make dist` that runs locally) and
+  # publishes with the preinstalled gh CLI, so no third-party action gets
+  # the write token. Runs only after verify passed for the same commit.
   release:
-    name: "release ${{ matrix.goos }}/${{ matrix.goarch }}"
+    name: release
     runs-on: ubuntu-22.04
+    needs: verify
     if: >
       startsWith(github.ref, 'refs/tags/')
       || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-    strategy:
-      fail-fast: false
-      matrix:
-        # Target systems: Linux x86_64, Linux ARM64 and macOS ARM64.
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: arm64
-
     permissions:
       contents: write
+    env:
+      # Passed via env instead of ${{ }} in run scripts, so a crafted tag
+      # name cannot inject shell code.
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
 
-      - name: Resolve build metadata
-        id: meta
-        run: |
-          echo "version=${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Release binary
-        uses: wangyoucao577/go-release-action@v1.55
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          release_tag: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
-          goos: ${{ matrix.goos }}
-          goarch: ${{ matrix.goarch }}
-          goversion: "1.27"
-          binary_name: openvpn_exporter
-          ldflags: >-
-            -X 'main.version=${{ steps.meta.outputs.version }}'
-            -X 'main.buildDate=${{ steps.meta.outputs.date }}'
-          sha256sum: true
-          overwrite: true
-          extra_files: LICENSE README.md config.example.yml
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build archives
+        run: make dist VERSION="$TAG"
+
+      - name: Publish release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS --verify-tag --title "$TAG" --generate-notes
+          fi

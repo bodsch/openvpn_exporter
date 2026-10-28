@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -281,5 +283,136 @@ func (c constCollector) Describe(ch chan<- *prometheus.Desc) { prometheus.Descri
 func (c constCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, m := range c {
 		ch <- m
+	}
+}
+
+// TestCollectAllFeatures scrapes every feature at once with inputs that
+// occur in practice, through a pedantic registry: any duplicate series,
+// undescribed metric or invalid label fails the whole scrape there, just
+// as it does for Prometheus.
+func TestCollectAllFeatures(t *testing.T) {
+	dir := t.TempDir()
+	tf, err := tlsfiles.WriteTestFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const hdr = "HEADER\tCLIENT_LIST\tCommon Name\tReal Address\tVirtual Address\tVirtual IPv6 Address\tBytes Received\tBytes Sent\tConnected Since\tConnected Since (time_t)\tUsername\tClient ID\tPeer ID\tData Channel Cipher\n"
+	client := func(cn, real, v4, v6 string) string {
+		return strings.Join([]string{"CLIENT_LIST", cn, real, v4, v6, "10", "20", "2026-10-27 08:00:00", "1792396800", "UNDEF", "0", "0", "AES-256-GCM"}, "\t") + "\n"
+	}
+	status := "TITLE\tOpenVPN 2.6.12 x86_64-pc-linux-gnu\nTIME\t2026-10-27 10:00:00\t1792404000\n" + hdr +
+		// duplicate-cn: two connections with one common name, from one host
+		client("shared", "203.0.113.1:1000", "10.8.0.20", "") +
+		client("shared", "203.0.113.1:1001", "10.8.0.21", "") +
+		// IPv6 only
+		client("v6only", "[2001:db8::1]:1194", "", "fd00::30") +
+		// two common names that are both invalid UTF-8, and equal once repaired
+		client("bad\xff", "198.51.100.1:1000", "10.8.0.40", "") +
+		client("bad\xfe", "198.51.100.2:1000", "10.8.0.41", "") +
+		// malformed bytes
+		strings.Join([]string{"CLIENT_LIST", "broken", "x", "10.8.0.50", "", "many"}, "\t") + "\n" +
+		"HEADER\tROUTING_TABLE\tVirtual Address\tCommon Name\tReal Address\tLast Ref\tLast Ref (time_t)\n" +
+		"ROUTING_TABLE\t10.8.0.20\tshared\t203.0.113.1:1000\t2026-10-27 09:59:50\t1792403990\n" +
+		"ROUTING_TABLE\t10.8.0.99\tgone\t203.0.113.9:1000\t2026-10-27 09:59:50\t1792403990\n" +
+		"END\n"
+	statusFile := filepath.Join(dir, "status.log")
+	if err := os.WriteFile(statusFile, []byte(status), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, _ := newTestCollector(t, fmt.Sprintf(`
+servers:
+  - name: a
+    status_file: %q
+    certificates: [%q, %q]
+    crls: [%q]
+    expected_clients: [shared, missing, missing]
+    ping:
+      connected_clients: true
+      targets:
+        - {name: static-shared, address: 10.8.0.20}
+        - {name: lan, address: 192.168.50.1}
+  - name: b
+    status_file: ../openvpn/testdata/status-v3.log
+    certificates: [%q]
+    expected_clients: [filiale-01]
+`, statusFile, tf.Server, tf.Inline, tf.CRL, tf.Server))
+	scrapeUntilPinged(t, c, 6)
+
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(c)
+	for i := range 2 { // the second scrape is served from the TLS file cache
+		if _, err := reg.Gather(); err != nil {
+			t.Fatalf("scrape %d: %v", i+1, err)
+		}
+	}
+	problems, err := testutil.CollectAndLint(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range problems {
+		t.Errorf("lint %s: %s", p.Metric, p.Text)
+	}
+
+	want := `
+# HELP openvpn_client_connections Number of active connections of a client; 0 for expected clients that are not connected.
+# TYPE openvpn_client_connections gauge
+openvpn_client_connections{common_name="bad` + "�" + `",server="a"} 2
+openvpn_client_connections{common_name="filiale-01",server="b"} 1
+openvpn_client_connections{common_name="laptop-bob",server="b"} 1
+openvpn_client_connections{common_name="missing",server="a"} 0
+openvpn_client_connections{common_name="shared",server="a"} 2
+openvpn_client_connections{common_name="v6only",server="a"} 1
+# HELP openvpn_status_parse_errors Number of lines of the last status that could not be parsed and were skipped.
+# TYPE openvpn_status_parse_errors gauge
+openvpn_status_parse_errors{server="a"} 1
+openvpn_status_parse_errors{server="b"} 0
+`
+	// The alert rule relies on it: skipped lines do not mark the server down.
+	want += `
+# HELP openvpn_up Whether the OpenVPN status could be read (1) or not (0).
+# TYPE openvpn_up gauge
+openvpn_up{server="a"} 1
+openvpn_up{server="b"} 1
+`
+	if err := testutil.CollectAndCompare(c, strings.NewReader(want), "openvpn_client_connections", "openvpn_status_parse_errors", "openvpn_up"); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestPingTargetsSurviveStatusOutage: while the status cannot be read, for
+// example during an OpenVPN restart, the clients connected last keep being
+// pinged. Otherwise their ping metrics would vanish exactly when the
+// server is in trouble, and ping alerts would resolve instead of fire.
+func TestPingTargetsSurviveStatusOutage(t *testing.T) {
+	statusFile := filepath.Join(t.TempDir(), "status.log")
+	data, err := os.ReadFile("../openvpn/testdata/status-v3.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statusFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := newTestCollector(t, fmt.Sprintf(`
+servers:
+  - name: main
+    status_file: %q
+    ping: {connected_clients: true}
+`, statusFile))
+	scrapeUntilPinged(t, c, 2)
+
+	if err := os.Remove(statusFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.CollectAndCompare(c, strings.NewReader(`
+# HELP openvpn_up Whether the OpenVPN status could be read (1) or not (0).
+# TYPE openvpn_up gauge
+openvpn_up{server="main"} 0
+# HELP openvpn_client_ping_success Whether the client answered at least one ICMP echo request.
+# TYPE openvpn_client_ping_success gauge
+openvpn_client_ping_success{address="10.8.0.10",common_name="laptop-bob",server="main"} 1
+openvpn_client_ping_success{address="10.8.0.6",common_name="filiale-01",server="main"} 1
+`), "openvpn_up", "openvpn_client_ping_success"); err != nil {
+		t.Error(err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
@@ -31,11 +32,14 @@ type CRL struct {
 // are found anywhere in the file, so OpenVPN configs with inline <ca> and
 // <cert> sections work as well.
 func LoadCertificates(path string) ([]Certificate, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return parseCertificates(path, data)
+}
 
+func parseCertificates(path string, data []byte) ([]Certificate, error) {
 	var ders [][]byte
 	rest := data
 	for {
@@ -71,10 +75,14 @@ func LoadCertificates(path string) ([]Certificate, error) {
 
 // LoadCRL reads a PEM or DER encoded certificate revocation list.
 func LoadCRL(path string) (*CRL, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return parseCRL(path, data)
+}
+
+func parseCRL(path string, data []byte) (*CRL, error) {
 	der := data
 	if block, _ := pem.Decode(data); block != nil {
 		if block.Type != "X509 CRL" {
@@ -95,6 +103,30 @@ func LoadCRL(path string) (*CRL, error) {
 		NextUpdate: rl.NextUpdate,
 		Revoked:    len(rl.RevokedCertificateEntries),
 	}, nil
+}
+
+// maxFileSize bounds certificate and CRL files. Even CRLs of large PKIs
+// stay far below it; a wrong path such as a device must not exhaust memory.
+const maxFileSize = 64 << 20
+
+func readFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readLimited(path, f)
+}
+
+func readLimited(path string, r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxFileSize {
+		return nil, fmt.Errorf("%s: larger than %d MiB", path, maxFileSize>>20)
+	}
+	return data, nil
 }
 
 func name(cn, full string) string {
