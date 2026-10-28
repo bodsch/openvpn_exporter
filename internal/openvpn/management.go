@@ -195,11 +195,17 @@ func (s *session) multiLine(cmd string) ([]string, error) {
 	if err := s.send(cmd); err != nil {
 		return nil, err
 	}
-	var lines []string
+	var (
+		lines []string
+		size  int
+	)
 	for {
 		line, err := s.readLine()
 		if err != nil {
 			return nil, err
+		}
+		if size += len(line) + 1; size > maxStatusSize {
+			return nil, fmt.Errorf("%s: %w", cmd, errStatusTooLarge)
 		}
 		switch {
 		case line == "END":

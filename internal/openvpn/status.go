@@ -115,12 +115,24 @@ func parseTime(v string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unknown time format %q", v)
 }
 
+// maxStatusSize bounds the status read from a file or the management
+// interface. A status of 10000 clients is a few MB.
+const maxStatusSize = 64 << 20
+
+var errStatusTooLarge = fmt.Errorf("status larger than %d MiB", maxStatusSize>>20)
+
 // ParseStatus parses OpenVPN status output in version 1, 2 or 3 format.
 func ParseStatus(r io.Reader) (*Status, error) {
-	var lines []string
+	var (
+		lines []string
+		size  int
+	)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
+		if size += len(sc.Bytes()) + 1; size > maxStatusSize {
+			return nil, errStatusTooLarge
+		}
 		lines = append(lines, strings.TrimRight(sc.Text(), "\r"))
 	}
 	if err := sc.Err(); err != nil {

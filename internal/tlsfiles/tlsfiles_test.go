@@ -3,6 +3,7 @@ package tlsfiles
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -135,4 +136,22 @@ func BenchmarkCRL(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestLoadTooLarge(t *testing.T) {
+	big := filepath.Join(t.TempDir(), "big.pem")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxFileSize + 1); err != nil { // sparse, costs no disk space
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := LoadCRL(big); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("LoadCRL: err = %v", err)
+	}
+	if _, err := NewCache().Certificates(big); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("Cache.Certificates: err = %v", err)
+	}
 }

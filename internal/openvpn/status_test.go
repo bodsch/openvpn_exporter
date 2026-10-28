@@ -1,6 +1,8 @@
 package openvpn
 
 import (
+	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -137,5 +139,30 @@ func TestParseLoadStats(t *testing.T) {
 	}
 	if *ls != (LoadStats{Clients: 2, BytesIn: 123, BytesOut: 456}) {
 		t.Errorf("got %+v", ls)
+	}
+}
+
+// repeatReader returns line forever.
+type repeatReader struct{ line []byte }
+
+func (r repeatReader) Read(p []byte) (int, error) {
+	n := 0
+	for n+len(r.line) <= len(p) {
+		n += copy(p[n:], r.line)
+	}
+	if n == 0 {
+		n = copy(p, r.line)
+	}
+	return n, nil
+}
+
+func endlessStatus() io.Reader {
+	return io.MultiReader(strings.NewReader("TITLE,x\n"),
+		repeatReader{[]byte("GLOBAL_STATS," + strings.Repeat("x", 4000) + ",1\n")})
+}
+
+func TestParseStatusTooLarge(t *testing.T) {
+	if _, err := ParseStatus(endlessStatus()); !errors.Is(err, errStatusTooLarge) {
+		t.Fatalf("err = %v", err)
 	}
 }

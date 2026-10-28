@@ -1,7 +1,6 @@
 package tlsfiles
 
 import (
-	"io"
 	"os"
 	"sync"
 	"time"
@@ -61,7 +60,7 @@ func load[T any](mu *sync.Mutex, m map[string]entry[T], path string, parse func(
 		return e.value, nil
 	}
 
-	data, err := io.ReadAll(f)
+	data, err := readLimited(path, f)
 	if err != nil {
 		return zero, err
 	}

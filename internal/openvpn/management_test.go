@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -206,6 +208,17 @@ func TestReadLineTooLong(t *testing.T) {
 	in := strings.Repeat("x", maxLineLength+1) + "\n"
 	s := &session{r: newReader(strings.NewReader(in))}
 	if _, err := s.readLine(); err == nil || !strings.Contains(err.Error(), "line longer than") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMultiLineTooLarge(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	go func() { _, _ = io.Copy(io.Discard, c2) }() // swallow the command
+	s := &session{conn: c1, r: newReader(endlessStatus())}
+	if _, err := s.multiLine("status 3"); !errors.Is(err, errStatusTooLarge) {
 		t.Fatalf("err = %v", err)
 	}
 }
