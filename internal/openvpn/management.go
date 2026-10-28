@@ -35,6 +35,7 @@ type ManagementClient struct {
 	password string
 	timeout  time.Duration
 	sem      chan struct{} // holds one token while a request is running
+	dial     func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 // NewManagementClient creates a client for address, which is "host:port",
@@ -49,7 +50,7 @@ func NewManagementClient(address, password string, timeout time.Duration) *Manag
 	case strings.HasPrefix(address, "tcp://"):
 		address = strings.TrimPrefix(address, "tcp://")
 	}
-	return &ManagementClient{network: network, address: address, password: password, timeout: timeout, sem: make(chan struct{}, 1)}
+	return &ManagementClient{network: network, address: address, password: password, timeout: timeout, sem: make(chan struct{}, 1), dial: (&net.Dialer{}).DialContext}
 }
 
 // Fetch reads "status 3" and "load-stats" from the management interface.
@@ -64,8 +65,7 @@ func (m *ManagementClient) Fetch(ctx context.Context) (*Status, *LoadStats, erro
 		return nil, nil, fmt.Errorf("waiting for running management request: %w", ctx.Err())
 	}
 
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, m.network, m.address)
+	conn, err := m.dial(ctx, m.network, m.address)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connecting to management interface: %w", err)
 	}
