@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -69,6 +70,29 @@ func main() {
 	}
 
 	col := collector.New(cfg, logger)
+	srv := &http.Server{
+		Handler:           newHandler(newRegistry(col), *metricsPath, *maxRequests, logger),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go col.Run(ctx)
+
+	l, err := net.Listen("tcp", *listenAddress)
+	if err != nil {
+		logger.Error("listening failed", "address", *listenAddress, "err", err)
+		os.Exit(1)
+	}
+	logger.Info("starting openvpn_exporter", "version", version, "build_date", buildDate, "address", l.Addr().String(), "servers", len(cfg.Servers))
+	if err := serve(ctx, srv, l, *webConfigFile, logger); err != nil {
+		logger.Error("HTTP server failed", "err", err)
+		os.Exit(1)
+	}
+}
+
+func newRegistry(col prometheus.Collector) *prometheus.Registry {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
 		col,
@@ -76,11 +100,16 @@ func main() {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		buildInfo(),
 	)
+	return reg
+}
 
+// newHandler serves the metrics of g under metricsPath, with at most
+// maxRequests scrapes in parallel (0 = unlimited), and a landing page.
+func newHandler(g prometheus.Gatherer, metricsPath string, maxRequests int, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(*metricsPath, promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+	mux.Handle(metricsPath, promhttp.HandlerFor(g, promhttp.HandlerOpts{
 		ErrorLog:            slog.NewLogLogger(logger.Handler(), slog.LevelError),
-		MaxRequestsInFlight: *maxRequests,
+		MaxRequestsInFlight: maxRequests,
 	}))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -89,36 +118,25 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<html><head><title>OpenVPN Exporter</title></head><body>
-<h1>OpenVPN Exporter</h1><p><a href="%s">Metrics</a></p></body></html>`, *metricsPath)
+<h1>OpenVPN Exporter</h1><p><a href="%s">Metrics</a></p></body></html>`, metricsPath)
 	})
+	return mux
+}
 
-	srv := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go col.Run(ctx)
+// serve serves srv on l until ctx is cancelled, with TLS and basic auth
+// from webConfigFile if it is set. A shutdown via ctx is not an error.
+func serve(ctx context.Context, srv *http.Server, l net.Listener, webConfigFile string, logger *slog.Logger) error {
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-
-	logger.Info("starting openvpn_exporter", "version", version, "build_date", buildDate, "address", *listenAddress, "servers", len(cfg.Servers))
-	systemdSocket := false
-	flags := &web.FlagConfig{
-		WebListenAddresses: &[]string{*listenAddress},
-		WebSystemdSocket:   &systemdSocket,
-		WebConfigFile:      webConfigFile,
+	flags := &web.FlagConfig{WebConfigFile: &webConfigFile}
+	if err := web.Serve(l, srv, flags, logger); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
-	if err := web.ListenAndServe(srv, flags, logger); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("HTTP server failed", "err", err)
-		os.Exit(1)
-	}
+	return nil
 }
 
 func buildInfo() prometheus.Collector {
