@@ -2,7 +2,9 @@ package openvpn
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -37,7 +39,11 @@ func serveManagement(conn net.Conn, password, status string) {
 	if password != "" {
 		w(passwordPrompt)
 		line, _ := r.ReadString('\n')
-		if strings.TrimSpace(line) != password {
+		switch strings.TrimSpace(line) {
+		case password:
+		case "silent":
+			return // like OpenVPN 2.6: close without a message
+		default:
 			w("ERROR: bad password\r\n")
 			return
 		}
@@ -88,6 +94,7 @@ func TestManagementClient(t *testing.T) {
 		{name: "unix", address: "unix://" + sock},
 		{name: "tcp with password", address: "tcp://" + tcpL.Addr().String(), password: "s3cret"},
 		{name: "wrong password", address: tcpL.Addr().String(), password: "wrong", wantErr: "bad password"},
+		{name: "rejected password", address: tcpL.Addr().String(), password: "silent", wantErr: "wrong password?"},
 		{name: "missing password", address: tcpL.Addr().String(), wantErr: "requires a password"},
 	}
 	for _, tt := range tests {
@@ -167,5 +174,38 @@ func TestManagementClientWaitTimeout(t *testing.T) {
 	// Serialized without a bounded wait this would take 3 × 300ms.
 	if d := time.Since(start); d > 600*time.Millisecond {
 		t.Errorf("concurrent Fetch calls took %v", d)
+	}
+}
+
+// BenchmarkReadLines reads a "status 3" answer of 5000 clients.
+func BenchmarkReadLines(b *testing.B) {
+	var sb strings.Builder
+	for i := range 5000 {
+		fmt.Fprintf(&sb, "CLIENT_LIST\tclient-%d\t203.0.113.%d:%d\t10.8.%d.%d\t\t123456789\t987654321\t2026-10-28 10:00:00\t1793181600\tUNDEF\t%d\t%d\tAES-256-GCM\r\n",
+			i, i%256, 40000+i, i/256, i%256, i, i)
+	}
+	sb.WriteString("END\r\n")
+	data := []byte(sb.String())
+	b.SetBytes(int64(len(data)))
+
+	for b.Loop() {
+		s := &session{r: newReader(bytes.NewReader(data))}
+		for {
+			line, err := s.readLine()
+			if err != nil {
+				b.Fatal(err)
+			}
+			if line == "END" {
+				break
+			}
+		}
+	}
+}
+
+func TestReadLineTooLong(t *testing.T) {
+	in := strings.Repeat("x", maxLineLength+1) + "\n"
+	s := &session{r: newReader(strings.NewReader(in))}
+	if _, err := s.readLine(); err == nil || !strings.Contains(err.Error(), "line longer than") {
+		t.Fatalf("err = %v", err)
 	}
 }

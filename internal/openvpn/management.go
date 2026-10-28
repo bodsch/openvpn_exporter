@@ -2,9 +2,11 @@ package openvpn
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -12,6 +14,14 @@ import (
 )
 
 const passwordPrompt = "ENTER PASSWORD:"
+
+// maxLineLength bounds a single line from the management interface, so a
+// misbehaving peer cannot make the exporter buffer unlimited input.
+const maxLineLength = 64 * 1024
+
+func newReader(r io.Reader) *bufio.Reader {
+	return bufio.NewReaderSize(r, maxLineLength)
+}
 
 // ManagementClient queries the OpenVPN management interface.
 //
@@ -64,7 +74,7 @@ func (m *ManagementClient) Fetch(ctx context.Context) (*Status, *LoadStats, erro
 		_ = conn.SetDeadline(deadline)
 	}
 
-	s := &session{conn: conn, r: bufio.NewReader(conn)}
+	s := &session{conn: conn, r: newReader(conn)}
 	if err := s.handshake(m.password); err != nil {
 		return nil, nil, err
 	}
@@ -96,23 +106,29 @@ type session struct {
 	r    *bufio.Reader
 }
 
-// readLine reads one line. The password prompt is not terminated by a
-// newline and is therefore returned as soon as it is complete.
+// readLine reads one newline terminated line.
 func (s *session) readLine() (string, error) {
-	var b strings.Builder
-	for {
-		c, err := s.r.ReadByte()
-		if err != nil {
-			return "", fmt.Errorf("reading from management interface: %w", err)
-		}
-		if c == '\n' {
-			return strings.TrimRight(b.String(), "\r"), nil
-		}
-		b.WriteByte(c)
-		if b.Len() == len(passwordPrompt) && b.String() == passwordPrompt {
-			return passwordPrompt, nil
-		}
+	line, err := s.r.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		return "", fmt.Errorf("reading from management interface: line longer than %d bytes", maxLineLength)
 	}
+	if err != nil {
+		return "", fmt.Errorf("reading from management interface: %w", err)
+	}
+	return string(bytes.TrimRight(line, "\r\n")), nil
+}
+
+// atPasswordPrompt consumes the password prompt if it is next. The prompt is
+// not terminated by a newline, so readLine would block on it. Every other
+// line of the handshake is longer than the prompt, so Peek cannot wait for
+// input that never comes.
+func (s *session) atPasswordPrompt() bool {
+	p, _ := s.r.Peek(len(passwordPrompt))
+	if string(p) != passwordPrompt {
+		return false
+	}
+	_, _ = s.r.Discard(len(p))
+	return true
 }
 
 func (s *session) send(cmd string) error {
@@ -124,19 +140,27 @@ func (s *session) send(cmd string) error {
 
 // handshake authenticates (if required) and waits for the welcome banner.
 func (s *session) handshake(password string) error {
+	sent := false
 	for {
-		line, err := s.readLine()
-		if err != nil {
-			return err
-		}
-		switch {
-		case line == passwordPrompt:
+		if s.atPasswordPrompt() {
 			if password == "" {
 				return errors.New("management interface requires a password, but none is configured")
 			}
 			if err := s.send(password); err != nil {
 				return err
 			}
+			sent = true
+			continue
+		}
+		line, err := s.readLine()
+		if sent && errors.Is(err, io.EOF) {
+			// OpenVPN closes the connection on a wrong password without an error message.
+			return errors.New("management interface closed the connection after the password was sent (wrong password?)")
+		}
+		if err != nil {
+			return err
+		}
+		switch {
 		case strings.HasPrefix(line, "ERROR:"):
 			return fmt.Errorf("management interface: %s", strings.TrimSpace(strings.TrimPrefix(line, "ERROR:")))
 		case strings.HasPrefix(line, ">INFO:"):
