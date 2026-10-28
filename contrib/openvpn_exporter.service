@@ -8,8 +8,10 @@ Wants=network-online.target
 Type=simple
 User=openvpn_exporter
 Group=openvpn_exporter
-# Read access to certificates, CRL, status file and password file.
-SupplementaryGroups=openvpn
+# Only if certificates, CRL or status file are readable by a group alone.
+# The group must exist: Debian and Ubuntu ship none for OpenVPN, and a
+# missing group stops every start with status 216/GROUP.
+#SupplementaryGroups=openvpn
 ExecStart=/usr/local/bin/openvpn_exporter --config.file=/etc/openvpn_exporter/config.yml
 Restart=on-failure
 

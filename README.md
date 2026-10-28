@@ -27,7 +27,15 @@ Management-Interface (empfohlen, liefert zusätzlich `load-stats`):
 management 127.0.0.1 7505 /etc/openvpn/server/mgmt.pass
 # oder als Unix-Socket:
 # management /run/openvpn/server.sock unix
+# management-client-group openvpn_exporter
 ```
+
+OpenVPN legt den Unix-Socket für alle lokalen User beschreibbar an (`srwxrwxrwx`). Ohne
+`management-client-group` kann also jeder lokale User den VPN-Server steuern, z. B. Clients trennen.
+Mit der Option nimmt OpenVPN nur Verbindungen von Prozessen dieser Gruppe an; gemeint ist die
+`Group=` aus der systemd-Unit des Exporters. Der Socket gehört nach `/run/openvpn/`: Debian legt
+`/run/openvpn-server/` mit `0710 root:root` an, dort kommt der Exporter nicht hin
+(`connect: permission denied`).
 
 OpenVPN erlaubt **nur eine** Management-Verbindung gleichzeitig. Der Exporter verbindet sich pro
 Scrape kurz und trennt sofort wieder; Abfragen pro Server werden serialisiert.
