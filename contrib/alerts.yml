@@ -18,6 +18,17 @@ groups:
         annotations:
           summary: "OpenVPN {{ $labels.server }}: status not updated for {{ $value | humanizeDuration }}"
 
+      # Unparsable lines are skipped, so the affected clients are missing
+      # from all client metrics while openvpn_up stays 1.
+      - alert: OpenVPNStatusParseErrors
+        expr: openvpn_status_parse_errors > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OpenVPN {{ $labels.server }}: {{ $value }} status lines not parsable"
+          description: "Clients on these lines are missing from the metrics. See the exporter log on {{ $labels.instance }} for the lines."
+
       - alert: OpenVPNCertificateExpiresSoon
         expr: (openvpn_certificate_not_after_timestamp_seconds - time()) / 86400 < 30
         labels:

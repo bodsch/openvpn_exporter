@@ -118,8 +118,8 @@ jobs:
           goversion: "1.27"
           binary_name: openvpn_exporter
           ldflags: >-
-            -X 'bodsch.me/openvpn_exporter/pkg/version.Version=${{ steps.meta.outputs.version }}'
-            -X 'bodsch.me/openvpn_exporter/pkg/version.BuildDate=${{ steps.meta.outputs.date }}'
+            -X 'main.version=${{ steps.meta.outputs.version }}'
+            -X 'main.buildDate=${{ steps.meta.outputs.date }}'
           sha256sum: true
           overwrite: true
           extra_files: LICENSE README.md config.example.yml

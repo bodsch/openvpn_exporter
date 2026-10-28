@@ -56,6 +56,8 @@ func TestParseErrors(t *testing.T) {
 		"missing pwfile": `servers: [{name: a, management: {address: x, password_file: /nonexistent}}]`,
 		"unknown field":  `servers: [{name: a, status_file: /x, statusfile: /y}]`,
 		"bad target":     `servers: [{name: a, status_file: /x, ping: {targets: [{name: b}]}}]`,
+		"duplicate cert": `servers: [{name: a, status_file: /x, certificates: [/c.crt, /c.crt]}]`,
+		"duplicate crl":  `servers: [{name: a, status_file: /x, crls: [/crl.pem, /crl.pem]}]`,
 	}
 	for name, in := range tests {
 		t.Run(name, func(t *testing.T) {

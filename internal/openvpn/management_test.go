@@ -136,3 +136,36 @@ func TestManagementClientTimeout(t *testing.T) {
 		t.Errorf("Fetch took %v", d)
 	}
 }
+
+func TestManagementClientWaitTimeout(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close() // never says anything
+		}
+	}()
+
+	c := NewManagementClient(l.Addr().String(), "", 300*time.Millisecond)
+	errs := make(chan error, 3)
+	start := time.Now()
+	for range 3 {
+		go func() { _, _, err := c.Fetch(context.Background()); errs <- err }()
+	}
+	for range 3 {
+		if err := <-errs; err == nil {
+			t.Fatal("expected error")
+		}
+	}
+	// Serialized without a bounded wait this would take 3 × 300ms.
+	if d := time.Since(start); d > 600*time.Millisecond {
+		t.Errorf("concurrent Fetch calls took %v", d)
+	}
+}

@@ -109,6 +109,9 @@ openvpn_server_info{server="main",version="2.6.12"} 1
 # HELP openvpn_status_updated_timestamp_seconds Time the OpenVPN status was last updated by the server.
 # TYPE openvpn_status_updated_timestamp_seconds gauge
 openvpn_status_updated_timestamp_seconds{server="main"} 1.792404e+09
+# HELP openvpn_status_parse_errors Number of lines of the last status that could not be parsed and were skipped.
+# TYPE openvpn_status_parse_errors gauge
+openvpn_status_parse_errors{server="main"} 0
 # HELP openvpn_connected_clients Number of currently connected clients.
 # TYPE openvpn_connected_clients gauge
 openvpn_connected_clients{server="main"} 2
@@ -149,7 +152,7 @@ openvpn_client_ping_rtt_seconds{address="10.8.0.6",common_name="router-01",serve
 `
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want),
 		"openvpn_up", "openvpn_server_info", "openvpn_status_updated_timestamp_seconds",
-		"openvpn_connected_clients", "openvpn_dco_enabled", "openvpn_client_connections",
+		"openvpn_status_parse_errors", "openvpn_connected_clients", "openvpn_dco_enabled", "openvpn_client_connections",
 		"openvpn_client_info", "openvpn_client_received_bytes_total",
 		"openvpn_client_last_activity_timestamp_seconds", "openvpn_client_ping_success",
 		"openvpn_client_ping_packet_loss_ratio", "openvpn_client_ping_rtt_seconds",
@@ -257,5 +260,26 @@ func TestStripPort(t *testing.T) {
 		if got := stripPort(in); got != want {
 			t.Errorf("stripPort(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestInvalidUTF8Labels(t *testing.T) {
+	ch := make(chan prometheus.Metric, 1)
+	ch <- gauge(descClientConns, 1, "main", "bad\xffname")
+	if err := testutil.CollectAndCompare(constCollector{<-ch}, strings.NewReader(`
+# HELP openvpn_client_connections Number of active connections of a client; 0 for expected clients that are not connected.
+# TYPE openvpn_client_connections gauge
+openvpn_client_connections{common_name="bad`+"�"+`name",server="main"} 1
+`)); err != nil {
+		t.Error(err)
+	}
+}
+
+type constCollector []prometheus.Metric
+
+func (c constCollector) Describe(ch chan<- *prometheus.Desc) { prometheus.DescribeByCollect(c, ch) }
+func (c constCollector) Collect(ch chan<- prometheus.Metric) {
+	for _, m := range c {
+		ch <- m
 	}
 }

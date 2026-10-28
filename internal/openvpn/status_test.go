@@ -103,10 +103,29 @@ func TestParseStatusErrors(t *testing.T) {
 	for name, in := range map[string]string{
 		"empty":   "",
 		"unknown": "garbage\n",
-		"bytes":   "TITLE\tx\nHEADER\tCLIENT_LIST\tCommon Name\tBytes Received\nCLIENT_LIST\ta\tnope\nEND\n",
 	} {
 		if _, err := ParseStatus(strings.NewReader(in)); err == nil {
 			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
+func TestParseStatusSkipsBadLines(t *testing.T) {
+	for name, in := range map[string]string{
+		"v3": "TITLE\tx\nTIME\tnope\nHEADER\tCLIENT_LIST\tCommon Name\tBytes Received\n" +
+			"CLIENT_LIST\ta\tnope\nCLIENT_LIST\tb\t42\nEND\n",
+		"v1": "OpenVPN CLIENT LIST\nUpdated,nope\nCommon Name,Bytes Received\n" +
+			"a,nope\nb,42\nEND\n",
+	} {
+		s, err := ParseStatus(strings.NewReader(in))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(s.Clients) != 1 || s.Clients[0].CommonName != "b" || s.Clients[0].BytesReceived != 42 {
+			t.Errorf("%s: clients = %+v", name, s.Clients)
+		}
+		if len(s.LineErrors) != 2 {
+			t.Errorf("%s: line errors = %v", name, s.LineErrors)
 		}
 	}
 }

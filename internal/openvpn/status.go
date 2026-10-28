@@ -20,6 +20,14 @@ type Status struct {
 	Clients     []Client
 	Routes      []Route
 	GlobalStats map[string]float64
+
+	// LineErrors holds lines that could not be parsed and were skipped,
+	// so that one malformed entry does not hide all other clients.
+	LineErrors []error
+}
+
+func (s *Status) lineError(n int, err error) {
+	s.LineErrors = append(s.LineErrors, fmt.Errorf("line %d: %w", n+1, err))
 }
 
 // Client is one entry of the CLIENT_LIST section.
@@ -178,7 +186,7 @@ func parseV2V3(lines []string, sep string) (*Status, error) {
 				s.UpdatedAt, err = parseTime(fields[1])
 			}
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", n+1, err)
+				s.lineError(n, err)
 			}
 		case "HEADER":
 			if len(fields) < 2 {
@@ -192,13 +200,15 @@ func parseV2V3(lines []string, sep string) (*Status, error) {
 		case "CLIENT_LIST":
 			c, err := parseClient(row{cols: headerOr(headers, "CLIENT_LIST", defaultClientCols), fields: fields})
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", n+1, err)
+				s.lineError(n, err)
+				continue
 			}
 			s.Clients = append(s.Clients, c)
 		case "ROUTING_TABLE":
 			rt, err := parseRoute(row{cols: headerOr(headers, "ROUTING_TABLE", defaultRouteCols), fields: fields})
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", n+1, err)
+				s.lineError(n, err)
+				continue
 			}
 			s.Routes = append(s.Routes, rt)
 		case "GLOBAL_STATS":
@@ -257,7 +267,7 @@ func parseV1(lines []string) (*Status, error) {
 		if section == "OpenVPN CLIENT LIST" && fields[0] == "Updated" && len(fields) > 1 {
 			t, err := parseTime(fields[1])
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", n+1, err)
+				s.lineError(n, err)
 			}
 			s.UpdatedAt = t
 			continue
@@ -283,13 +293,15 @@ func parseV1(lines []string) (*Status, error) {
 		case "OpenVPN CLIENT LIST":
 			c, err := parseClient(r)
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", n+1, err)
+				s.lineError(n, err)
+				continue
 			}
 			s.Clients = append(s.Clients, c)
 		case "ROUTING TABLE":
 			rt, err := parseRoute(r)
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", n+1, err)
+				s.lineError(n, err)
+				continue
 			}
 			s.Routes = append(s.Routes, rt)
 		}

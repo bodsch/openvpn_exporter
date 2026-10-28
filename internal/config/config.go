@@ -139,6 +139,15 @@ func (c *Config) finalize() error {
 			}
 		}
 
+		// The file path is a label value, so a duplicate would produce the
+		// same series twice and fail the whole scrape.
+		if err := checkUnique(s.Certificates); err != nil {
+			return fmt.Errorf("config: server %q: certificates: %w", s.Name, err)
+		}
+		if err := checkUnique(s.CRLs); err != nil {
+			return fmt.Errorf("config: server %q: crls: %w", s.Name, err)
+		}
+
 		p := &s.Ping
 		if p.CheckInterval <= 0 {
 			p.CheckInterval = 30 * time.Second
@@ -160,6 +169,17 @@ func (c *Config) finalize() error {
 				return fmt.Errorf("config: server %q: ping.targets[%d]: name and address are required", s.Name, j)
 			}
 		}
+	}
+	return nil
+}
+
+func checkUnique(paths []string) error {
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		if seen[p] {
+			return fmt.Errorf("duplicate file %q", p)
+		}
+		seen[p] = true
 	}
 	return nil
 }
