@@ -43,6 +43,10 @@ GOLANGCI := golangci-lint
 # variant, so a macOS run never saw it. One pin, one place.
 GOLANGCI_VERSION := v2.14.0
 
+# Pinned like golangci-lint, and the same version as in the CI workflow, so
+# a new release cannot turn a pipeline red that passed locally.
+GOVULNCHECK_VERSION := v1.9.0
+
 .DEFAULT_GOAL := build
 
 .PHONY: help
@@ -114,7 +118,7 @@ lint-install: ## Install the pinned golangci-lint (what CI runs).
 
 .PHONY: vuln
 vuln: ## Scan deps and reachable code for known vulnerabilities (govulncheck).
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 .PHONY: sec
 sec: lint vuln ## Security checks: golangci-lint (incl. gosec) + govulncheck.

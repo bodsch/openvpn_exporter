@@ -53,10 +53,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -72,7 +72,7 @@ jobs:
 
       - name: Vulnerability scan (govulncheck)
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
 
   release:
@@ -98,7 +98,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -109,7 +109,7 @@ jobs:
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Release binary
-        uses: wangyoucao577/go-release-action@v1.55
+        uses: wangyoucao577/go-release-action@279495102627de7960cbc33434ab01a12bae144b # v1.55
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           release_tag: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
