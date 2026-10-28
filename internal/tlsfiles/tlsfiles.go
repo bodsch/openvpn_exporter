@@ -35,7 +35,10 @@ func LoadCertificates(path string) ([]Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseCertificates(path, data)
+}
 
+func parseCertificates(path string, data []byte) ([]Certificate, error) {
 	var ders [][]byte
 	rest := data
 	for {
@@ -75,6 +78,10 @@ func LoadCRL(path string) (*CRL, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseCRL(path, data)
+}
+
+func parseCRL(path string, data []byte) (*CRL, error) {
 	der := data
 	if block, _ := pem.Decode(data); block != nil {
 		if block.Type != "X509 CRL" {

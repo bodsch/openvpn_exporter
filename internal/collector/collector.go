@@ -74,6 +74,7 @@ type server struct {
 // Collector implements prometheus.Collector for a set of OpenVPN servers.
 type Collector struct {
 	servers []server
+	tls     *tlsfiles.Cache
 	logger  *slog.Logger
 }
 
@@ -84,7 +85,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Collector {
 }
 
 func newCollector(cfg *config.Config, logger *slog.Logger, ping probe.PingFunc) *Collector {
-	c := &Collector{logger: logger}
+	c := &Collector{tls: tlsfiles.NewCache(), logger: logger}
 	for _, s := range cfg.Servers {
 		var src StatusSource
 		if m := s.Management; m != nil {
@@ -243,7 +244,7 @@ func (c *Collector) collectTLSFiles(ch chan<- prometheus.Metric, cfg config.Serv
 	name := cfg.Name
 
 	for _, path := range cfg.Certificates {
-		certs, err := tlsfiles.LoadCertificates(path)
+		certs, err := c.tls.Certificates(path)
 		if err != nil {
 			c.logger.Warn("reading certificate failed", "server", name, "file", path, "err", err)
 			ch <- gauge(descTLSFileError, 1, name, path, "certificate")
@@ -263,7 +264,7 @@ func (c *Collector) collectTLSFiles(ch chan<- prometheus.Metric, cfg config.Serv
 	}
 
 	for _, path := range cfg.CRLs {
-		crl, err := tlsfiles.LoadCRL(path)
+		crl, err := c.tls.CRL(path)
 		if err != nil {
 			c.logger.Warn("reading CRL failed", "server", name, "file", path, "err", err)
 			ch <- gauge(descTLSFileError, 1, name, path, "crl")
